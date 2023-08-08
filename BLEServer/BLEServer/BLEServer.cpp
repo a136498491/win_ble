@@ -132,7 +132,8 @@ concurrency::task<IJsonValue^> pairRequest(JsonObject^ command) {
 
 	Windows::Foundation::EventRegistrationToken cookie = device->DeviceInformation->Pairing->Custom->PairingRequested += CustomOnPairingRequested;
 
-	auto result = co_await device->DeviceInformation->Pairing->Custom->PairAsync(Enumeration::DevicePairingKinds::ConfirmOnly, Enumeration::DevicePairingProtectionLevel::None);
+	//auto result = co_await device->DeviceInformation->Pairing->Custom->PairAsync(Enumeration::DevicePairingKinds::ConfirmOnly, Enumeration::DevicePairingProtectionLevel::None);
+	auto result = co_await device->DeviceInformation->Pairing->PairAsync();
 
 	device->DeviceInformation->Pairing->Custom->PairingRequested -= cookie;
 
