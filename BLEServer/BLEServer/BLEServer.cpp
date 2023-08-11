@@ -33,7 +33,7 @@ using namespace Windows::Data::Json;
 using namespace concurrency;
 
 Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher^ bleAdvertisementWatcher;
-auto devices = ref new Collections::Map<String^, Bluetooth::BluetoothLEDevice^>();
+auto devices = ref new Collections::Map<unsigned long long, Bluetooth::BluetoothLEDevice^>();
 auto characteristicsMap = ref new Collections::Map<String^, Bluetooth::GenericAttributeProfile::GattCharacteristic^>();
 auto characteristicsListenerMap = ref new Collections::Map<String^, Windows::Foundation::EventRegistrationToken>();
 auto characteristicsSubscriptionMap = ref new Collections::Map<String^, JsonValue^>();
@@ -50,6 +50,17 @@ std::wstring formatBluetoothAddress(unsigned long long BluetoothAddress) {
 	return ret.str();
 }
 
+String ^uint642Hex(unsigned long long BluetoothAddress) {
+	String ^aa = ref new String(TEXT("0123456789abcdef"), 16);
+	String^ ret = ref new String();
+
+	for (int i = 0; i < 48; i += 4) {
+		uint8_t n = BluetoothAddress & 0xF;
+		ret = aa->Data()[n] + ret;
+		BluetoothAddress >>= 4;
+	}
+	return ret;
+}
 
 Guid parseUuid(String^ uuid) {
 	if (uuid->Length() == 4) {
@@ -93,27 +104,46 @@ void writeObject(JsonObject^ jsonObject) {
 	LeaveCriticalSection(&OutputCriticalSection);
 }
 
-concurrency::task<IJsonValue^> connectRequest(JsonObject ^command) {
-	String ^addressStr = command->GetNamedString("address", "");
-	unsigned long long address = std::stoull(addressStr->Data(), 0, 16);
+concurrency::task<void> updateDevice(uint64_t address) {
+	if (devices->HasKey(address)) {
+		return;
+	}
+
 	auto device = co_await Bluetooth::BluetoothLEDevice::FromBluetoothAddressAsync(address);
 
 	if (device == nullptr) {
 		throw ref new FailureException(ref new String(L"Device not found (null)"));
 	}
-	devices->Insert(device->DeviceId, device);
-	device->ConnectionStatusChanged += ref new Windows::Foundation::TypedEventHandler<Bluetooth::BluetoothLEDevice ^, Platform::Object ^>(
+	
+	devices->Insert(device->BluetoothAddress, device);
+	device->ConnectionStatusChanged += ref new Windows::Foundation::TypedEventHandler<Bluetooth::BluetoothLEDevice^, Platform::Object^>(
 		[](Windows::Devices::Bluetooth::BluetoothLEDevice^ device, Platform::Object^ eventArgs) {
 
-		if (device->ConnectionStatus == Bluetooth::BluetoothConnectionStatus::Disconnected) {
+			bool connected = device->ConnectionStatus == Bluetooth::BluetoothConnectionStatus::Connected;
 			JsonObject^ msg = ref new JsonObject();
-			msg->Insert("_type", JsonValue::CreateStringValue("disconnectEvent"));
-			msg->Insert("device", JsonValue::CreateStringValue(device->DeviceId));
+
+			msg->Insert("_type", JsonValue::CreateStringValue("connectionEvent"));
+			msg->Insert("device", JsonValue::CreateStringValue(uint642Hex(device->BluetoothAddress)));
+			msg->Insert("status", JsonValue::CreateBooleanValue(connected));
 			writeObject(msg);
-			devices->Remove(device->DeviceId);
-		}
-	});
-	return JsonValue::CreateStringValue(device->DeviceId);
+		});
+}
+
+concurrency::task < Bluetooth::BluetoothLEDevice^> getDevice(String ^addressStr) {
+	unsigned long long address = std::stoull(addressStr->Data(), 0, 16);
+
+	co_await updateDevice(address);
+
+	if (!devices->HasKey(address)) {
+		throw ref new FailureException(ref new String(L"Device not found"));
+	}
+	return devices->Lookup(address);
+}
+
+concurrency::task<IJsonValue^> openRequest(JsonObject ^command) {
+	auto addressStr = command->GetNamedString("address", "");
+	co_await getDevice(addressStr);
+	return JsonValue::CreateStringValue(addressStr);
 }
 
 auto CustomOnPairingRequested = ref new Windows::Foundation::TypedEventHandler<Enumeration::DeviceInformationCustomPairing^, Enumeration::DevicePairingRequestedEventArgs^>
@@ -123,71 +153,56 @@ auto CustomOnPairingRequested = ref new Windows::Foundation::TypedEventHandler<E
 
 
 concurrency::task<IJsonValue^> pairRequest(JsonObject^ command) {
-	String^ deviceId = command->GetNamedString("device", "");
-
-	if (!devices->HasKey(deviceId)) {
-		throw ref new FailureException(ref new String(L"Device not found"));
-	}
-	Bluetooth::BluetoothLEDevice^ device = devices->Lookup(deviceId);
+	auto addressStr = command->GetNamedString("address", "");
+	auto device = co_await getDevice(addressStr);
 
 	Windows::Foundation::EventRegistrationToken cookie = device->DeviceInformation->Pairing->Custom->PairingRequested += CustomOnPairingRequested;
 
-	//auto result = co_await device->DeviceInformation->Pairing->Custom->PairAsync(Enumeration::DevicePairingKinds::ConfirmOnly, Enumeration::DevicePairingProtectionLevel::None);
-	auto result = co_await device->DeviceInformation->Pairing->PairAsync();
+	auto result = co_await device->DeviceInformation->Pairing->Custom->PairAsync(Enumeration::DevicePairingKinds::ConfirmOnly, Enumeration::DevicePairingProtectionLevel::None);
 
 	device->DeviceInformation->Pairing->Custom->PairingRequested -= cookie;
-
-	bool canPair = device->DeviceInformation->Pairing->CanPair;
-
-	bool isPaired = device->DeviceInformation->Pairing->IsPaired;
 
 	return JsonValue::CreateStringValue(result->Status.ToString());
 }
 
-JsonValue^ canPair(JsonObject^ command) {
-	String^ deviceId = command->GetNamedString("device", "");
-	if (!devices->HasKey(deviceId)) {
-		throw ref new FailureException(ref new String(L"Device not found"));
-	}
-	Bluetooth::BluetoothLEDevice^ device = devices->Lookup(deviceId);
+concurrency::task < JsonValue^ > canPair(JsonObject^ command) {
+	auto addressStr = command->GetNamedString("address", "");
+	unsigned long long address = std::stoull(addressStr->Data(), 0, 16);
+
+	auto device = co_await Bluetooth::BluetoothLEDevice::FromBluetoothAddressAsync(address);
+
 	bool canPair = device->DeviceInformation->Pairing->CanPair;
+
+	delete device;
 
 	return JsonValue::CreateBooleanValue(canPair);
 }
 
-JsonValue^ isPaired(JsonObject^ command) {
-	String^ deviceId = command->GetNamedString("device", "");
-	if (!devices->HasKey(deviceId)) {
-		throw ref new FailureException(ref new String(L"Device not found"));
-	}
-	Bluetooth::BluetoothLEDevice^ device = devices->Lookup(deviceId);
+concurrency::task < JsonValue^ > isPaired(JsonObject^ command) {
+	auto addressStr = command->GetNamedString("address", "");
+	unsigned long long address = std::stoull(addressStr->Data(), 0, 16);
+
+	auto device = co_await Bluetooth::BluetoothLEDevice::FromBluetoothAddressAsync(address);
+
 	bool isPaired = device->DeviceInformation->Pairing->IsPaired;
+
+	delete device;
+
 	return JsonValue::CreateBooleanValue(isPaired);
 }
 
-
-
 concurrency::task<IJsonValue^> unPairRequest(JsonObject^ command) {
-	String^ deviceId = command->GetNamedString("device", "");
-	if (!devices->HasKey(deviceId)) {
-		throw ref new FailureException(ref new String(L"Device not found"));
-	}
-	Bluetooth::BluetoothLEDevice^ device = devices->Lookup(deviceId);
+	auto addressStr = command->GetNamedString("address", "");
+	auto device = co_await getDevice(addressStr);
 
 	auto result = co_await	device->DeviceInformation->Pairing->UnpairAsync();
-
-	bool canPair = device->DeviceInformation->Pairing->CanPair;
-	bool isPaired = device->DeviceInformation->Pairing->IsPaired;
 
 	return JsonValue::CreateStringValue(result->Status.ToString());
 }
 
-Concurrency::task<IJsonValue^> disconnectRequest(JsonObject ^command) {
-	String ^deviceId = command->GetNamedString("device", "");
-	if (!devices->HasKey(deviceId)) {
-		throw ref new FailureException(ref new String(L"Device not found"));
-	}
-	Bluetooth::BluetoothLEDevice^ device = devices->Lookup(deviceId);
+concurrency::task < IJsonValue^ > disconnectRequest(JsonObject ^command) {
+	auto addressStr = command->GetNamedString("address", "");
+	auto device = co_await getDevice(addressStr);
 
 	// When disconnecting from a device, also remove all the characteristics from our cache.
 	auto newCharacteristicsMap = ref new Collections::Map<String^, Bluetooth::GenericAttributeProfile::GattCharacteristic^>();
@@ -219,17 +234,16 @@ Concurrency::task<IJsonValue^> disconnectRequest(JsonObject ^command) {
 		}
 	}
 	characteristicsMap = newCharacteristicsMap;
-	devices->Remove(deviceId);
+	devices->Remove(device->BluetoothAddress);
+	delete device;
 
-	return Concurrency::task_from_result<IJsonValue^>(JsonValue::CreateNullValue());
+	return JsonValue::CreateNullValue();
 }
 
 concurrency::task<Bluetooth::GenericAttributeProfile::GattDeviceServicesResult^> findServices(JsonObject ^command) {
-	String ^deviceId = command->GetNamedString("device", "");
-	if (!devices->HasKey(deviceId)) {
-		throw ref new FailureException(ref new String(L"Device not found"));
-	}
-	Bluetooth::BluetoothLEDevice^ device = devices->Lookup(deviceId);
+	auto addressStr = command->GetNamedString("address", "");
+	auto device = co_await getDevice(addressStr);
+
 	if (command->HasKey("service")) {
 		return co_await device->GetGattServicesForUuidAsync(parseUuid(command->GetNamedString("service")));
 	}
@@ -248,7 +262,7 @@ String^ characteristicKey(String^ device, String^ service, String^ characteristi
 }
 
 String^ characteristicKey(JsonObject ^command) {
-	return characteristicKey(command->GetNamedString("device"), command->GetNamedString("service"), command->GetNamedString("characteristic"));
+	return characteristicKey(command->GetNamedString("address"), command->GetNamedString("service"), command->GetNamedString("characteristic"));
 }
 
 concurrency::task<Bluetooth::GenericAttributeProfile::GattCharacteristicsResult^> findCharacteristics(JsonObject ^command) {
@@ -264,7 +278,7 @@ concurrency::task<Bluetooth::GenericAttributeProfile::GattCharacteristicsResult^
 	auto results = co_await service->GetCharacteristicsAsync();
 	for (unsigned int i = 0; i < results->Characteristics->Size; i++) {
 		auto characteristic = results->Characteristics->GetAt(i);
-		auto key = characteristicKey(command->GetNamedString("device"), command->GetNamedString("service"), characteristic->Uuid.ToString());
+		auto key = characteristicKey(command->GetNamedString("address"), command->GetNamedString("service"), characteristic->Uuid.ToString());
 		characteristicsMap->Insert(key, characteristic);
 	}
 	return results;
@@ -406,6 +420,18 @@ concurrency::task<IJsonValue^> subscribeRequest(JsonObject ^command) {
 	return subscriptionId;
 }
 
+concurrency::task<IJsonValue^> radioRequest(JsonObject^ command) {
+	bool state = command->GetNamedBoolean("state", true);
+	auto rs = co_await Radio::GetRadiosAsync();
+
+	for (Radios::Radio^ radio : rs) {
+		if (radio->Kind == Radios::RadioKind::Bluetooth) {
+			radio->SetStateAsync(state ? Radios::RadioState::On : Radios::RadioState::Off);
+		}
+	}
+	return JsonValue::CreateNullValue();
+}
+
 concurrency::task<IJsonValue^> unsubscribeRequest(JsonObject ^command) {
 	auto characteristic = co_await getCharacteristic(command);
 
@@ -449,14 +475,14 @@ concurrency::task<void> processCommand(JsonObject ^command) {
 			bleAdvertisementWatcher->Stop();
 			result = JsonValue::CreateNullValue();
 		}
-		if (cmd->Equals("connect")) {
-			result = co_await connectRequest(command);
+		if (cmd->Equals("open")) {
+			result = co_await openRequest(command);
 		}
 		if (cmd->Equals("canPair")) {
-			result = canPair(command);
+			result = co_await canPair(command);
 		}
 		if (cmd->Equals("isPaired")) {
-			result = isPaired(command);
+			result = co_await isPaired(command);
 		}
 		if (cmd->Equals("pair")) {
 			result = co_await pairRequest(command);
@@ -492,6 +518,9 @@ concurrency::task<void> processCommand(JsonObject ^command) {
 
 		if (cmd->Equals("unsubscribe")) {
 			result = co_await unsubscribeRequest(command);
+		}
+		if (cmd->Equals("radioSwitch")) {
+			result = co_await radioRequest(command);
 		}
 
 		if (result != nullptr) {
