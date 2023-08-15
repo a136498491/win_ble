@@ -15,7 +15,7 @@ class BleDevice {
       required this.name,
       required this.serviceUuids,
       required this.manufacturerData,
-      this.adStructures});
+      required this.adStructures});
 
   String address;
   String name;
@@ -24,20 +24,20 @@ class BleDevice {
   String advType;
   Uint8List manufacturerData;
   List<dynamic> serviceUuids;
-  List<AdStructure>? adStructures;
+  List<AdStructure> adStructures;
 
   factory BleDevice.fromJson(Map<String, dynamic> json) => BleDevice(
         address: json["bluetoothAddress"] ?? "",
         rssi: json["rssi"]?.toString() ?? "",
         timestamp: json["timestamp"]?.toString() ?? "",
         advType: json["advType"] ?? "",
-        name: json["localName"] ?? "N/A",
+        name: json["localName"] ?? "",
         serviceUuids: json["serviceUuids"],
         manufacturerData: json["manufacturerData"] != null
             ? Uint8List.fromList(List<int>.from(json["manufacturerData"]))
             : Uint8List.fromList(List.empty()),
         adStructures: json["adStructures"] == null
-            ? null
+            ? []
             : List<AdStructure>.from(json["adStructures"].map((x) =>
                 AdStructure(type: x["type"], data: List<int>.from(x["data"])))),
       );
@@ -48,8 +48,9 @@ class BleDevice {
         "timestamp": timestamp,
         "advType": advType,
         "localName": name,
-        "serviceUuids": serviceUuids.toString(),
+        "serviceUuids": serviceUuids,
         "manufacturerData": manufacturerData.toString(),
+        "adStructures": adStructures,
       };
 }
 
@@ -57,4 +58,12 @@ class AdStructure {
   int type;
   List<int> data;
   AdStructure({required this.type, required this.data});
+  toJson() => {
+    "type": type,
+    "data": data,
+  };
+  @override
+  String toString() {
+    return toJson().toString();
+  }
 }
